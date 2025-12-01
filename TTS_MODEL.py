@@ -9,7 +9,9 @@ from threading import Thread
 from queue import Queue
 
 from pydub import AudioSegment
-from pydub.playback import play
+from pydub.playback import _play_with_ffplay
+import subprocess
+import tempfile
 
 import LOGS
 import traceback
@@ -89,10 +91,23 @@ class TTS_MODEL:
         try:
             LOGS.log_info(f"Playing response form TTS Model")
             song = AudioSegment.from_wav("RESPONSE.wav")
-            play(song)
+            self._play_silent(song)
         except Exception as e:
             LOGS.log_error(f"Playback failed: {e}\n{traceback.format_exc()}")
             raise
+
+    def _play_silent(self, audio_segment):
+        """Play audio using ffplay with suppressed output."""
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            audio_segment.export(f.name, format="wav")
+            try:
+                subprocess.run(
+                    ["ffplay", "-nodisp", "-autoexit", "-hide_banner", "-loglevel", "quiet", f.name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+            finally:
+                os.unlink(f.name)
 
     def synthesize_stream(self, text):
         """Generator that yields audio chunks as they're synthesized"""
@@ -125,8 +140,8 @@ class TTS_MODEL:
                 sample_width=2,
                 channels=1
             )
-            with suppress_all_output():
-                play(audio_segment)
+            # Use silent playback to avoid polluting stdout
+            self._play_silent(audio_segment)
         except Exception as e:
             LOGS.log_error(f"Playback failed: {e}\n{traceback.format_exc()}")
 

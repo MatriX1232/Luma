@@ -33,26 +33,43 @@ def create_ollama_terminal():
     
     sleep(2)  # give some time for ollama to start
 
-def text_fetcher():
-    """Fetches text from the AI model, prints it, and queues it for TTS."""
-    print("AI: ", end='', flush=True)
+def text_fetcher(user_input, text_queue, print_queue):
+    """Fetches text from the AI model and queues it for printing and TTS."""
     try:
         for chunk in MAIN_MODEL.generate_response(user_input):
-            print(chunk, end='', flush=True)
+            print_queue.put(chunk)
             text_queue.put(chunk)
+    except Exception as e:
+        LOGS.log_error(f"text_fetcher error: {e}")
     finally:
+        print_queue.put(None)
         text_queue.put(None)
 
-def synthesis_worker():
+def print_worker(print_queue):
+    """Prints text chunks as they arrive - runs in main thread context."""
+    sys.stdout.write("AI: ")
+    sys.stdout.flush()
+    while True:
+        chunk = print_queue.get()
+        if chunk is None:
+            break
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+
+def synthesis_worker(text_queue, audio_queue):
     """Synthesizes audio sentence by sentence."""
     sentence_buffer = ""
     while True:
-        chunk = text_queue.get()
+        chunk = text_queue.get()  # blocking get is fine here
+            
         if chunk is None:
             # Process any remaining text
             if sentence_buffer.strip():
-                for audio in TTS_MODEL.synthesize_stream(sentence_buffer):
-                    audio_queue.put(audio)
+                try:
+                    for audio in TTS_MODEL.synthesize_stream(sentence_buffer):
+                        audio_queue.put(audio)
+                except Exception as e:
+                    LOGS.log_error(f"synthesis_worker error: {e}")
             break
         
         sentence_buffer += chunk
@@ -65,18 +82,24 @@ def synthesis_worker():
                 sentence, sentence_buffer = parts[0], ""
             
             if sentence.strip():
-                for audio in TTS_MODEL.synthesize_stream(sentence):
-                    audio_queue.put(audio)
+                try:
+                    for audio in TTS_MODEL.synthesize_stream(sentence):
+                        audio_queue.put(audio)
+                except Exception as e:
+                    LOGS.log_error(f"synthesis_worker error: {e}")
     
     audio_queue.put(None)
 
-def playback_worker():
+def playback_worker(audio_queue):
     """Plays audio chunks from the queue."""
     while True:
-        audio = audio_queue.get()
+        audio = audio_queue.get()  # blocking get is fine here
         if audio is None:
             break
-        TTS_MODEL.play_audio_chunk(audio)
+        try:
+            TTS_MODEL.play_audio_chunk(audio)
+        except Exception as e:
+            LOGS.log_error(f"playback_worker error: {e}")
 
 
 
@@ -123,17 +146,26 @@ if __name__ == "__main__":
 
             text_queue = Queue()
             audio_queue = Queue()
+            print_queue = Queue()
 
-            # Start threads
-            threads = [
-                Thread(target=text_fetcher),
-                Thread(target=synthesis_worker, daemon=True),
-                Thread(target=playback_worker, daemon=True)
-            ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
+            # Start threads - separate printing from synthesis
+            t_fetcher = Thread(target=text_fetcher, args=(user_input, text_queue, print_queue))
+            t_printer = Thread(target=print_worker, args=(print_queue,))
+            t_synth = Thread(target=synthesis_worker, args=(text_queue, audio_queue))
+            t_playback = Thread(target=playback_worker, args=(audio_queue,))
+
+            t_fetcher.start()
+            t_printer.start()
+            t_synth.start()
+            t_playback.start()
+
+            # Wait for text streaming and printing to finish first
+            t_fetcher.join()
+            t_printer.join()
+            
+            # Then wait for audio pipeline to complete
+            t_synth.join()
+            t_playback.join()
 
             print()  # newline after response
 

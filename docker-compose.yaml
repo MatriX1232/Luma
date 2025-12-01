@@ -1,0 +1,31 @@
+services:
+  luma:
+    build: .
+    image: luma:gpu
+    stdin_open: true
+    tty: true
+    network_mode: host
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PULSE_SERVER=unix:/run/user/1000/pulse/native
+    volumes:
+      - ./:/app
+      - ./config.conf:/app/config.conf:ro
+      - /run/user/1000/pulse/native:/run/user/1000/pulse/native
+      - kokoro-cache:/root/.local/share/kokoro
+      - hf-cache:/root/.cache/huggingface
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  kokoro-cache:
+  hf-cache:
