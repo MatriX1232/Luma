@@ -4,22 +4,21 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 WORKDIR /app
 
-# Add deadsnakes PPA for Python 3.12 on Ubuntu 22.04
+# Install system Python 3.10 (Ubuntu default) plus GTK and audio deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common curl \
-  && add-apt-repository -y ppa:deadsnakes/ppa \
-  && apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-venv python3.12-dev \
-    ca-certificates ffmpeg libsndfile1 libasound2 pulseaudio-utils git \
-  && rm -rf /var/lib/apt/lists/*
+        python3 python3-venv python3-dev python3-pip \
+        ca-certificates ffmpeg libsndfile1 libasound2 pulseaudio-utils git \
+        libgtk-3-0 libgtk-3-dev \
+        pkg-config libgirepository1.0-dev libcairo2-dev gobject-introspection \
+        gir1.2-gtk-3.0 gir1.2-glib-2.0 \
+        # PyGObject bindings for system Python (avoids building from source)
+        python3-gi python3-gi-cairo \
+    && rm -rf /var/lib/apt/lists/*
 
-# Set Python 3.12 as default
-RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 \
-  && ln -sf /usr/bin/python3.12 /usr/bin/python
+# Ensure pip is up to date
+RUN python3 -m pip install --upgrade pip setuptools wheel
 
-# Install pip via get-pip.py (distutils no longer exists in 3.12)
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python \
-  && python -m pip install --upgrade pip setuptools wheel
+# (PyGObject is provided by python3-gi; no extra pip install needed)
 
 # Copy requirements first (for better layer caching)
 COPY requirements.txt /app/requirements.txt
@@ -37,6 +36,7 @@ COPY config.conf /app/config.conf
 COPY . /app
 
 ENV PYTHONUNBUFFERED=1
+ENV DISPLAY=:0
 
 # ENTRYPOINT ["bash"]
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["python3", "app.py"]
