@@ -21,14 +21,21 @@ RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 \
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python \
   && python -m pip install --upgrade pip setuptools wheel
 
+# Copy requirements first (for better layer caching)
 COPY requirements.txt /app/requirements.txt
+
+# Install Python packages with BuildKit cache mount
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /app/requirements.txt
+
+# Install CUDA-13 compatible torch with cache
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install torch --index-url https://download.pytorch.org/whl/cu130
+
+# Copy the rest of the app (changes here won't invalidate pip cache)
 COPY config.conf /app/config.conf
-RUN pip install --no-cache-dir -r /app/requirements.txt
-
-# Install CUDA-13 compatible torch wheel (adjust if you prefer a specific build)
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu130
-
 COPY . /app
+
 ENV PYTHONUNBUFFERED=1
 
 # ENTRYPOINT ["bash"]

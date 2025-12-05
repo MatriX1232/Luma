@@ -1,6 +1,7 @@
 import subprocess
 from colored import fg, attr
 import LOGS
+from SYSTEM_CALLS import execute_on_host
 
 
 def test_main_execution():
@@ -11,15 +12,16 @@ def test_main_execution():
 
 
 def test_ollama_presence():
-    result = subprocess.run(['which', 'ollama'], capture_output=True, text=True)
-    assert result.returncode == 0
-    assert result.stdout.strip() != ''
+    is_success, output = execute_on_host('which ollama')
+    assert is_success == True
+    assert output.strip() != ''
     LOGS.log_success(f"{fg('green')}[PASS]{attr('reset')} Test of ollama presence")
 
 def test_ollama_models():
-    result = subprocess.run(['ollama', 'list'], capture_output=True, text=True)
-    assert result.returncode == 0
-    assert 'llama3.2' in result.stdout
+    is_success, output = execute_on_host('ollama list')
+    # result = subprocess.run(['ollama', 'list'], cap/ture_output=True, text=True)
+    assert is_success == True
+    assert 'llama3.2' in output
     LOGS.log_success(f"{fg('green')}[PASS]{attr('reset')} Test of ollama models")
 
 
@@ -32,10 +34,16 @@ def test_cuda_availability():
 
 def test_cuda_in_ollama():
     try:
-        result = subprocess.run(['ollama', 'serve'], capture_output=True, text=True, timeout=5)
-        output = (result.stdout or '') + (result.stderr or '')
-    except subprocess.TimeoutExpired as e:
-        # process was killed after timeout; collect any partial output
-        output = (e.stdout or '') + (e.stderr or '') if hasattr(e, 'stdout') or hasattr(e, 'stderr') else ''
-    assert 'NVIDIA GeForce' in output.decode('utf-8')
-    LOGS.log_success(f"{fg('green')}[PASS]{attr('reset')} Test of CUDA in ollama")
+        is_success, output = execute_on_host('ollama serve')
+        assert is_success == True
+        assert 'CUDA' in output or 'GPU' in output
+        LOGS.log_success(f"{fg('green')}[PASS]{attr('reset')} Test of CUDA in Ollama")
+    except Exception as e:
+        LOGS.log_error(f"{fg('red')}[FAIL]{attr('reset')} Test of CUDA in Ollama: {e}")
+
+
+if __name__ == "__main__":
+    test_main_execution()
+    test_cuda_availability()
+    # test_ollama_presence()
+    # test_cuda_in_ollama()

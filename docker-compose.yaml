@@ -5,13 +5,20 @@ services:
     stdin_open: true
     tty: true
     network_mode: host
+    pid: host
+    privileged: true
     environment:
       - PYTHONUNBUFFERED=1
       - PULSE_SERVER=unix:/run/user/1000/pulse/native
+      - DISPLAY=${DISPLAY}
+      - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
+      - XDG_RUNTIME_DIR=/run/user/1000
     volumes:
       - ./:/app
       - ./config.conf:/app/config.conf:ro
       - /run/user/1000/pulse/native:/run/user/1000/pulse/native
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /run/user/1000:/run/user/1000:rw
       - kokoro-cache:/root/.local/share/kokoro
       - hf-cache:/root/.cache/huggingface
     devices:

@@ -1,11 +1,14 @@
 all: 
-	docker compose up --build
+	sudo docker compose build
+
+start:
+	sudo docker compose run --rm luma
 
 down:
-	docker compose down
+	sudo docker compose down
 
 fclean:
-	docker compose down --rmi all -v --remove-orphans
+	sudo docker compose down --rmi all -v --remove-orphans
 
 re: fclean all
 

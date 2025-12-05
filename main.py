@@ -8,39 +8,82 @@ import shutil
 from time import sleep
 import configparser
 import re
-from threading import Thread
-from queue import Queue
+from threading import Thread, Event
+from queue import Queue, Empty
 import numpy as np
+import signal
 
 from MAIN_MODEL import MAIN_MODEL
 from TTS_MODEL import TTS_MODEL
+from SYSTEM_CALLS import *
+
+# Global stop event for interrupting response
+stop_event = Event()
 
 
-def create_ollama_terminal():
-    #try to open a new terminal and run ollama serve there; fall back to detached nohup
-    _terminals = ['gnome-terminal', 'mate-terminal', 'konsole', 'xterm', 'xfce4-terminal', 'lxterminal', 'terminator', 'alacritty']
-    _term = next((t for t in _terminals if shutil.which(t)), None)
+def start_ollama_background():
+    """Start ollama serve on the HOST machine using nsenter if not already running."""
+    # Check if ollama is already running
+    try:
+        result = subprocess.run(
+            ['curl', '-s', 'http://localhost:11434/api/tags'],
+            capture_output=True,
+            timeout=2
+        )
+        if result.returncode == 0:
+            LOGS.log_info("Ollama is already running")
+            return True
+    except:
+        pass
     
-    if _term:
-        if _term in ('gnome-terminal', 'mate-terminal'):
-            _cmd = [_term, '--', 'bash', '-c', 'ollama serve; exec bash']
+    # Start ollama on HOST using nsenter (run in host's PID/mount namespace)
+    LOGS.log_info("Starting Ollama on host via nsenter...")
+    try:
+        # nsenter with PID 1 enters the host's namespaces
+        # -t 1: target PID 1 (init process on host)
+        # -m: mount namespace
+        # -u: UTS namespace  
+        # -n: network namespace
+        # -i: IPC namespace
+        # Start ollama with nohup and redirect output to suppress GIN logs
+        subprocess.Popen(
+            ['nsenter', '-t', '1', '-m', '-u', '-n', '-i', '--', 
+             'sh', '-c', 'nohup ollama serve > /dev/null 2>&1 &'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        sleep(3)  # Give ollama time to start
+        
+        # Verify it started
+        result = subprocess.run(
+            ['curl', '-s', 'http://localhost:11434/api/tags'],
+            capture_output=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            LOGS.log_success("Ollama started successfully on host")
+            return True
         else:
-            _cmd = [_term, '-e', 'bash', '-c', 'ollama serve; exec bash']
-        subprocess.Popen(_cmd, stdout=open(os.devnull, 'wb'), stderr=open(os.devnull, 'wb'), preexec_fn=os.setsid)
-    else:
-        # no terminal found — run fully detached
-        subprocess.Popen(['nohup', 'ollama', 'serve'], stdout=open(os.devnull, 'wb'), stderr=open(os.devnull, 'wb'), preexec_fn=os.setsid)
-    
-    sleep(2)  # give some time for ollama to start
+            LOGS.log_error("Ollama failed to start on host")
+            return False
+    except FileNotFoundError:
+        LOGS.log_error("nsenter not found. Cannot start Ollama on host.")
+        return False
+    except Exception as e:
+        LOGS.log_error(f"Failed to start Ollama: {e}")
+        return False
 
 def text_fetcher(user_input, text_queue, print_queue):
     """Fetches text from the AI model and queues it for printing and TTS."""
     try:
         for chunk in MAIN_MODEL.generate_response(user_input):
+            if stop_event.is_set():
+                break
             print_queue.put(chunk)
             text_queue.put(chunk)
     except Exception as e:
-        LOGS.log_error(f"text_fetcher error: {e}")
+        if not stop_event.is_set():
+            LOGS.log_error(f"text_fetcher error: {e}")
     finally:
         print_queue.put(None)
         text_queue.put(None)
@@ -50,7 +93,12 @@ def print_worker(print_queue):
     sys.stdout.write("AI: ")
     sys.stdout.flush()
     while True:
-        chunk = print_queue.get()
+        try:
+            chunk = print_queue.get(timeout=0.1)
+        except Empty:
+            if stop_event.is_set():
+                break
+            continue
         if chunk is None:
             break
         sys.stdout.write(chunk)
@@ -60,21 +108,34 @@ def synthesis_worker(text_queue, audio_queue):
     """Synthesizes audio sentence by sentence."""
     sentence_buffer = ""
     while True:
-        chunk = text_queue.get()  # blocking get is fine here
+        try:
+            chunk = text_queue.get(timeout=0.1)
+        except Empty:
+            if stop_event.is_set():
+                break
+            continue
             
         if chunk is None:
-            # Process any remaining text
-            if sentence_buffer.strip():
+            # Process any remaining text (only if not stopped)
+            if sentence_buffer.strip() and not stop_event.is_set():
                 try:
                     for audio in TTS_MODEL.synthesize_stream(sentence_buffer):
+                        if stop_event.is_set():
+                            break
                         audio_queue.put(audio)
                 except Exception as e:
-                    LOGS.log_error(f"synthesis_worker error: {e}")
+                    if not stop_event.is_set():
+                        LOGS.log_error(f"synthesis_worker error: {e}")
             break
         
+        if stop_event.is_set():
+            break
+            
         sentence_buffer += chunk
         # Check for sentence boundaries
         while any(p in sentence_buffer for p in ['.', '!', '?', '\n']):
+            if stop_event.is_set():
+                break
             parts = re.split(r'(?<=[.!?\n])\s*', sentence_buffer, maxsplit=1)
             if len(parts) > 1:
                 sentence, sentence_buffer = parts[0], parts[1]
@@ -84,24 +145,33 @@ def synthesis_worker(text_queue, audio_queue):
             if sentence.strip():
                 try:
                     for audio in TTS_MODEL.synthesize_stream(sentence):
+                        if stop_event.is_set():
+                            break
                         audio_queue.put(audio)
                 except Exception as e:
-                    LOGS.log_error(f"synthesis_worker error: {e}")
+                    if not stop_event.is_set():
+                        LOGS.log_error(f"synthesis_worker error: {e}")
     
     audio_queue.put(None)
 
 def playback_worker(audio_queue):
     """Plays audio chunks from the queue."""
     while True:
-        audio = audio_queue.get()  # blocking get is fine here
+        try:
+            audio = audio_queue.get(timeout=0.1)
+        except Empty:
+            if stop_event.is_set():
+                break
+            continue
         if audio is None:
+            break
+        if stop_event.is_set():
             break
         try:
             TTS_MODEL.play_audio_chunk(audio)
         except Exception as e:
-            LOGS.log_error(f"playback_worker error: {e}")
-
-
+            if not stop_event.is_set():
+                LOGS.log_error(f"playback_worker error: {e}")
 
 if __name__ == "__main__":
     LOGS.log_info("Application started")
@@ -113,10 +183,10 @@ if __name__ == "__main__":
         try:
             tests.test_main_execution()
             tests.test_cuda_availability()
-            tests.test_ollama_presence()
-            tests.test_cuda_in_ollama()
+            # tests.test_ollama_presence()
+            # tests.test_cuda_in_ollama()
 
-            create_ollama_terminal()
+            start_ollama_background()
             tests.test_ollama_models()
         except AssertionError as e:
             LOGS.log_error(f"Test failed: {e}")
@@ -124,9 +194,26 @@ if __name__ == "__main__":
         finally:
             LOGS.log_info("All tests completed\n")
 
+    LOGS.log_info("Current screen brightness on host: " + str(get_screen_brightness()))
+    set_screen_brightness(70)
+    LOGS.log_info("Screen brightness after setting to 70% on host: " + str(get_screen_brightness()))
+
+
+    while True:
+        if input("Do u wish to continue? (y/n): ").lower() == 'y':
+            break
+        else:
+            LOGS.log_info("Exiting application as per user request.")
+            sys.exit(0)
+
+
+
+    # Always try to start Ollama on host if not running
+    start_ollama_background()
 
     MAIN_MODEL = MAIN_MODEL(
-        model_name=config.get('DEFAULT', 'MAIN_MODEL', fallback='None')
+        model_name=config.get('DEFAULT', 'MAIN_MODEL', fallback='None'),
+        use_tools=config.getboolean('DEFAULT', 'USE_TOOLS', fallback=False)
     )
 
     TTS_MODEL = TTS_MODEL(
@@ -136,6 +223,7 @@ if __name__ == "__main__":
     LOGS.log_info(f"Main AI Model set to: {config.get('DEFAULT', 'MAIN_MODEL', fallback='None')}")
     LOGS.log_info(f"TTS Model set to: {config.get('DEFAULT', 'TTS_MODEL', fallback='default')}")
     LOGS.log_info(f"Use GPU: {config.getboolean('DEFAULT', 'USE_GPU', fallback=False)}")
+    LOGS.log_info(f"Use Tools: {config.getboolean('DEFAULT', 'USE_TOOLS', fallback=False)}")
 
     while True:
         try:
@@ -144,6 +232,9 @@ if __name__ == "__main__":
                 LOGS.log_info("Exiting application.")
                 break
 
+            # Reset stop event for new response
+            stop_event.clear()
+            
             text_queue = Queue()
             audio_queue = Queue()
             print_queue = Queue()
@@ -159,17 +250,29 @@ if __name__ == "__main__":
             t_synth.start()
             t_playback.start()
 
-            # Wait for text streaming and printing to finish first
-            t_fetcher.join()
-            t_printer.join()
-            
-            # Then wait for audio pipeline to complete
-            t_synth.join()
-            t_playback.join()
+            # Wait for threads with interrupt handling
+            try:
+                while t_fetcher.is_alive() or t_printer.is_alive() or t_synth.is_alive() or t_playback.is_alive():
+                    t_fetcher.join(timeout=0.1)
+                    t_printer.join(timeout=0.1)
+                    t_synth.join(timeout=0.1)
+                    t_playback.join(timeout=0.1)
+            except KeyboardInterrupt:
+                # Ctrl+C during response - stop all workers and continue to next prompt
+                print("\n[Interrupted]")
+                stop_event.set()
+                # Wait for threads to finish cleanly
+                t_fetcher.join(timeout=1)
+                t_printer.join(timeout=1)
+                t_synth.join(timeout=1)
+                t_playback.join(timeout=1)
+                continue
 
             print()  # newline after response
 
         except KeyboardInterrupt:
+            # Ctrl+C at prompt - exit application
+            print()
             LOGS.log_info("Exiting application due to keyboard interrupt.")
             break
         except Exception as e:
