@@ -19,14 +19,26 @@ from SYSTEM_CALLS import *
 
 # Global stop event for interrupting response
 stop_event = Event()
+main_model = None
+tts_model = None
 
 
 def start_ollama_background():
     """Start ollama serve on the HOST machine using nsenter if not already running."""
+    curl_path = shutil.which('curl')
+    if not curl_path:
+        LOGS.log_error("curl not found. Cannot check/manage Ollama.")
+        return False
+
+    nsenter_path = shutil.which('nsenter')
+    if not nsenter_path:
+        LOGS.log_error("nsenter not found. Cannot start Ollama on host.")
+        return False
+
     # Check if ollama is already running
     try:
         result = subprocess.run(
-            ['curl', '-s', 'http://localhost:11434/api/tags'],
+            [curl_path, '-s', 'http://localhost:11434/api/tags'],
             capture_output=True,
             timeout=2
         )
@@ -47,7 +59,7 @@ def start_ollama_background():
         # -i: IPC namespace
         # Start ollama with nohup and redirect output to suppress GIN logs
         subprocess.Popen(
-            ['nsenter', '-t', '1', '-m', '-u', '-n', '-i', '--', 
+            [nsenter_path, '-t', '1', '-m', '-u', '-n', '-i', '--', 
              'sh', '-c', 'nohup ollama serve > /dev/null 2>&1 &'],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
@@ -56,7 +68,7 @@ def start_ollama_background():
         
         # Verify it started
         result = subprocess.run(
-            ['curl', '-s', 'http://localhost:11434/api/tags'],
+            [curl_path, '-s', 'http://localhost:11434/api/tags'],
             capture_output=True,
             timeout=5
         )
@@ -66,9 +78,6 @@ def start_ollama_background():
         else:
             LOGS.log_error("Ollama failed to start on host")
             return False
-    except FileNotFoundError:
-        LOGS.log_error("nsenter not found. Cannot start Ollama on host.")
-        return False
     except Exception as e:
         LOGS.log_error(f"Failed to start Ollama: {e}")
         return False
@@ -76,7 +85,11 @@ def start_ollama_background():
 def text_fetcher(user_input, text_queue, print_queue):
     """Fetches text from the AI model and queues it for printing and TTS."""
     try:
-        for chunk in MAIN_MODEL.generate_response(user_input):
+        if main_model is None:
+            LOGS.log_error("MAIN_MODEL not initialized")
+            return
+
+        for chunk in main_model.generate_response(user_input):
             if stop_event.is_set():
                 break
             print_queue.put(chunk)
@@ -119,7 +132,11 @@ def synthesis_worker(text_queue, audio_queue):
             # Process any remaining text (only if not stopped)
             if sentence_buffer.strip() and not stop_event.is_set():
                 try:
-                    for audio in TTS_MODEL.synthesize_stream(sentence_buffer):
+                    if tts_model is None:
+                        LOGS.log_error("TTS_MODEL not initialized")
+                        break
+
+                    for audio in tts_model.synthesize_stream(sentence_buffer):
                         if stop_event.is_set():
                             break
                         audio_queue.put(audio)
@@ -144,7 +161,11 @@ def synthesis_worker(text_queue, audio_queue):
             
             if sentence.strip():
                 try:
-                    for audio in TTS_MODEL.synthesize_stream(sentence):
+                    if tts_model is None:
+                        LOGS.log_error("TTS_MODEL not initialized")
+                        break
+
+                    for audio in tts_model.synthesize_stream(sentence):
                         if stop_event.is_set():
                             break
                         audio_queue.put(audio)
@@ -168,7 +189,11 @@ def playback_worker(audio_queue):
         if stop_event.is_set():
             break
         try:
-            TTS_MODEL.play_audio_chunk(audio)
+            if tts_model is None:
+                LOGS.log_error("TTS_MODEL not initialized")
+                break
+
+            tts_model.play_audio_chunk(audio)
         except Exception as e:
             if not stop_event.is_set():
                 LOGS.log_error(f"playback_worker error: {e}")
@@ -194,29 +219,27 @@ if __name__ == "__main__":
         finally:
             LOGS.log_info("All tests completed\n")
 
-    LOGS.log_info("Current screen brightness on host: " + str(get_screen_brightness()))
-    set_screen_brightness(70)
-    LOGS.log_info("Screen brightness after setting to 70% on host: " + str(get_screen_brightness()))
+    use_gui = config.getboolean('DEFAULT', 'USE_GUI', fallback=False)
 
-
-    while True:
-        if input("Do u wish to continue? (y/n): ").lower() == 'y':
-            break
-        else:
-            LOGS.log_info("Exiting application as per user request.")
-            sys.exit(0)
+    if not use_gui:
+        while True:
+            if input("Do u wish to continue? (y/n): ").lower() == 'y':
+                break
+            else:
+                LOGS.log_info("Exiting application as per user request.")
+                sys.exit(0)
 
 
 
     # Always try to start Ollama on host if not running
     start_ollama_background()
 
-    MAIN_MODEL = MAIN_MODEL(
+    main_model = MAIN_MODEL(
         model_name=config.get('DEFAULT', 'MAIN_MODEL', fallback='None'),
         use_tools=config.getboolean('DEFAULT', 'USE_TOOLS', fallback=False)
     )
 
-    TTS_MODEL = TTS_MODEL(
+    tts_model = TTS_MODEL(
         device= "cuda" if config.getboolean('DEFAULT', 'USE_GPU', fallback=False) is True else "cpu"
     )
 

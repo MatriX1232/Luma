@@ -7,11 +7,11 @@ WORKDIR /app
 # Install system Python 3.10 (Ubuntu default) plus GTK and audio deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-venv python3-dev python3-pip \
-        ca-certificates ffmpeg libsndfile1 libasound2 pulseaudio-utils git \
+        ca-certificates curl ffmpeg libsndfile1 libasound2 pulseaudio-utils git \
         libgtk-3-0 libgtk-3-dev \
         pkg-config libgirepository1.0-dev libcairo2-dev gobject-introspection \
         gir1.2-gtk-3.0 gir1.2-glib-2.0 \
-        # PyGObject bindings for system Python (avoids building from source)
+        util-linux \
         python3-gi python3-gi-cairo \
     && rm -rf /var/lib/apt/lists/*
 
@@ -39,4 +39,4 @@ ENV PYTHONUNBUFFERED=1
 ENV DISPLAY=:0
 
 # ENTRYPOINT ["bash"]
-ENTRYPOINT ["python3", "app.py"]
+ENTRYPOINT ["python3", "main.py"]
